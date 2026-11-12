@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+extern crate alloc;
+
 use core::ffi::{c_void, c_char, c_int};
 use axhal::arch::TrapFrame;
 use axhal::trap::{register_trap_handler, SYSCALL};
@@ -131,16 +133,54 @@ fn handle_syscall(tf: &TrapFrame, syscall_num: usize) -> isize {
     ret
 }
 
-#[allow(unused_variables)]
 fn sys_mmap(
     addr: *mut usize,
     length: usize,
     prot: i32,
     flags: i32,
     fd: i32,
-    _offset: isize,
+    offset: isize,
 ) -> isize {
-    unimplemented!("no sys_mmap!");
+    if length == 0 {
+        return -LinuxError::EINVAL.code() as isize;
+    }
+
+    let curr = current();
+    let aspace = curr.task_ext().aspace.clone();
+    let mut aspace = aspace.lock();
+
+    let page_size = 0x1000;
+    let aligned_len = (length + page_size - 1) & !(page_size - 1);
+
+    let mmap_prot = MmapProt::from_bits_truncate(prot);
+    let mapping_flags: MappingFlags = mmap_prot.into();
+
+    let target_vaddr = if (addr as usize) != 0 {
+        axhal::mem::VirtAddr::from((addr as usize) & !(page_size - 1))
+    } else {
+        axhal::mem::VirtAddr::from(0x2000_0000)
+    };
+
+    if let Err(e) = aspace.map_alloc(target_vaddr, aligned_len, mapping_flags, true) {
+        ax_println!("sys_mmap map_alloc failed: {:?}", e);
+        return -LinuxError::ENOMEM.code() as isize;
+    }
+
+    if fd >= 0 {
+        let mmap_flags = MmapFlags::from_bits_truncate(flags);
+        if !mmap_flags.contains(MmapFlags::MAP_ANONYMOUS) {
+            let mut file_buf = alloc::vec![0u8; length];
+            if offset >= 0 {
+                let _ = api::sys_lseek(fd, offset as _, 0);
+            }
+            let read_bytes = api::sys_read(fd, file_buf.as_mut_ptr() as _, length);
+            if read_bytes > 0 {
+                let _ = aspace.write(target_vaddr, &file_buf[..read_bytes as usize]);
+            }
+        }
+    }
+
+    target_vaddr.as_usize() as isize
 }
 
 fn sys_openat(dfd: c_int, fname: *const c_char, flags: c_int, mode: api::ctypes::mode_t) -> isize {

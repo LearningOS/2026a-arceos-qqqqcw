@@ -67,6 +67,14 @@ impl DirNode {
         children.remove(name);
         Ok(())
     }
+
+    /// Renames a node from old_name to new_name in this directory.
+    pub fn rename_node(&self, old_name: &str, new_name: &str) -> VfsResult {
+        let mut children = self.children.write();
+        let node = children.remove(old_name).ok_or(VfsError::NotFound)?;
+        children.insert(new_name.into(), node);
+        Ok(())
+    }
 }
 
 impl VfsNodeOps for DirNode {
@@ -162,6 +170,22 @@ impl VfsNodeOps for DirNode {
             Err(VfsError::InvalidInput) // remove '.' or '..
         } else {
             self.remove_node(name)
+        }
+    }
+
+    fn rename(&self, src_path: &str, dst_path: &str) -> VfsResult {
+        log::debug!("rename at ramfs: {} -> {}", src_path, dst_path);
+        let src_trimmed = src_path.trim_matches('/');
+        let dst_trimmed = dst_path.trim_matches('/');
+        let src_name = src_trimmed.rsplit('/').next().unwrap_or(src_trimmed);
+        let dst_name = dst_trimmed.rsplit('/').next().unwrap_or(dst_trimmed);
+
+        if let Some(src_parent_path) = src_trimmed.rfind('/').map(|pos| &src_trimmed[..pos]) {
+            let parent_node = self.this.upgrade().ok_or(VfsError::NotFound)?.lookup(src_parent_path)?;
+            let parent_dir = parent_node.as_any().downcast_ref::<DirNode>().ok_or(VfsError::NotADirectory)?;
+            parent_dir.rename_node(src_name, dst_name)
+        } else {
+            self.rename_node(src_name, dst_name)
         }
     }
 
